@@ -81,13 +81,25 @@ def mutate(individual, mutationprob, mutationct, bqms, bqmindexdict, variables):
     else:
         mutationidx = np.random.randint(len(bqms), size=mutationct)
         for i in mutationidx:
-            init_samples = dict(zip(variables[i], samplefromindividual(individual, bqmindexdict)))
+            init_samples = dict(zip(variables[i], samplefromindividual(individual, bqmindexdict[j])))
             sampleset = sampler_reverse.sample(bqms[i],
                                    anneal_schedules=reverse_schedule,
                                    initial_state=init_samples,
                                    num_reads=1,
                                    reinitialize_state=False)
             writemutation(individual, sampleset.record.sample[0], bqmindexdict)
+
+def samplefromindividual(individual, bqmindexdict):
+    # bqmindexdict contains a mapping between the index of a variable in
+    # the partition bqm and the index of this variable in the unpartitioned 
+    # problem, i.e. if
+    # bqmindexdict[j][i] = k
+    # then the k-th variable in the j-th partitioned BQM 
+    # corresponds to the i-th variable in the global BQM
+    sample = numpy.zeros(shape=len(bqmindexdict),dtype=int8)
+    for key in bqmindexdict:
+        sample[key] = individual[bqmindexdict[key]]
+    return(sample)
 
 # Functions to do:
 # samplefromindividual (builds a sample array for a bqm given the individual and the bqmindexdict)
