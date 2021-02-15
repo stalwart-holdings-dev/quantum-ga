@@ -1,5 +1,5 @@
 # work in progress. this file contains only the first prototype
-
+# more documentation can be found here:
 # https://docs.ocean.dwavesys.com/projects/system/en/stable/reference/composites.html#reverse-anneal
 # https://cloud.dwavesys.com/leap/learning/
 
@@ -7,6 +7,8 @@ import numpy as np
 from dimod import ExactSolver, AdjArrayBQM
 from dwave.system import DWaveSampler, EmbeddingComposite
 from helpers.schedule import make_reverse_anneal_schedule 
+
+global solutiondict = {}
 
 def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
     # largebqm is an AdjArrayBQM object representing the bqm to be solved
@@ -19,6 +21,7 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
     # then the k-th variable in the j-th partitioned BQM 
     # corresponds to the i-th variable in the global BQM
     # gaparamsdict is a dictionary with the following entries:
+    # - nvars: number of variables of the large bqm
     # - gapopsize: population size for the genetic algorithm
     # - gagencount: number if generations to evolve
     # - tgtenergy: a target level of energy to stop the evolution if reached
@@ -28,7 +31,12 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
     # - mutationprob: probability that someone who is not elite will mutate
     # - eliteratio: fraction of lowest energy solutions that will carry on to the next generation without being mutated
     # - breedratio: fraction of a generation that is comprised of offsprings of the previous generation
+    # - randomtiebreak: True if intersecting variables between bqms should be chosen randomly when joining. can speed up the convergence of 
+    #                really large problems but makes each iteration slightly more expensive. should not be used when the bqms are completely
+    #                disjoint as there will be no benefit whatsoever but there will still be a performance cost from the random shuffle.
     
+    nvars = gaparamsdict['nvars']
+    tiebreak = gaparamsdict['randomtiebreak']
     mutationct = gaparamsdict['mutationct']
     gapopsize = gaparamsdict['gapopsize']
     mutationprob = gaparamsdict['mutationprob']
@@ -44,33 +52,39 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
     reverse_schedule = make_reverse_anneal_schedule(s_target=0.45, hold_time=gaparamsdict['holdtime'], ramp_up_slope=max_slope)
     
     samples = []
-    energies = []
     variables = []
     for i in range(len(problemdata['bqms'])):
-        quantumsol = sampler.sample(problemdata['bqms'][i], num_reads=n, annealing_time=gaparamsdict['annealtime'])
+        quantumsol = sampler.sample(problemdata['bqms'][i], num_reads=gapopsize, annealing_time=gaparamsdict['annealtime'])
         samples.append(quantumsol.record.sample)
-        energies.append(quantumsol.record.energy)
         variables.append(quantumsol.variables)
     
     population = []         # an array of gapopsize numpy arrays, each being one individual solution
-    sortedfitness = []      # an array containing the fitness sorted in ascending order (i.e. zero index is the lowest)
-    popindices = []         # defined such that sortedfitness[k] is the fitness of indivitual population[popindices[k]]
-    initialise(population, popindices, sortedfitness, samples)
+    sortedfitness = []      # a list of two-element tuples containing in the first element of the tuple
+                            # the fitness sorted in ascending order (i.e. zero index is the lowest) and in the
+                            # second element of the tuple the index in the list population that this fitness
+                            # value refers to.
+    initialise(population, sortedfitness, samples, tiebreak, nvars, largebqm, bqmindexdict)
     for i in range(gaparamsdict['gagencount']):
-        if sortedfitness[0] <= gaparamsdict['tgtenergy']:
+        if sortedfitness[0][0] <= gaparamsdict['tgtenergy']:
             break
         nextpopulation = []
+        nextfitness = []
         for j in range(0,eliteendindex):
             # add elites to nextpopulation
-            nextpopulation.append(population[popindices[j]])
+            nextpopulation.append(population[sortedfitness[j][1]])
+            addtofitnesslist(nextfitness, largebqm, population[j])
         for j in range(eliteendindex,parentsindex):
             # add remaining non-elites with appropriate mutations
-            nextpopulation.append(mutate(population[popindices[j]], mutationprob, mutationct, bqms, bqmindexdict, variables))
+            nextpopulation.append(mutate(population[sortedfitness[j][1]], mutationprob, mutationct, bqms, bqmindexdict, variables))
+            addtofitnesslist(nextfitness, largebqm, population[j])
         for j in range(parentsindex,gapopsize):
             # add breeds with appropriate mutations
-            nextpopulation.append(mutate(breed(population), mutationprob, mutationct, bqms, bqmindexdict, variables))
-        sortfitness(nextpopulation, popindices, sortedfitness)
+            offspring = breed(population, bqmindexdict, tiebreak)
+            nextpopulation.append(mutate(offspring, mutationprob, mutationct, bqms, bqmindexdict, variables))
+            addtofitnesslist(nextfitness, largebqm, population[j])
+        nextfitness.sort(key=lambda x: x[0])
         population = nextpopulation
+        sortedfitness = nextfitness
     
     return({'lastpopulation': population, 'popindices': popindices, 'sortedfitness': sortedfitness, 'ngen': i)
 
@@ -90,6 +104,7 @@ def mutate(individual, mutationprob, mutationct, bqms, bqmindexdict, variables):
             writemutation(individual, sampleset.record.sample[0], bqmindexdict)
 
 def samplefromindividual(individual, bqmindexdict):
+    # builds a sample array for a bqm given the individual and the bqmindexdict
     # bqmindexdict contains a mapping between the index of a variable in
     # the partition bqm and the index of this variable in the unpartitioned 
     # problem, i.e. if
@@ -101,15 +116,65 @@ def samplefromindividual(individual, bqmindexdict):
         sample[key] = individual[bqmindexdict[key]]
     return(sample)
 
-# Functions to do:
-# samplefromindividual (builds a sample array for a bqm given the individual and the bqmindexdict)
-# writemutation (writes the results from the reverse anneal onto the individual)
-# join (creates one large solution by combining all bqms with random tie breaks for the common points)
-# breed (creates one large solution by doing a join of bqms from the lowest energy solutions)
-# initialise (creates first population from inital forward anneals)
-# sortfitness (returns the fitness array sorted in ascending order)
-#
-# Internals to do:
-# solutiondict (to avoid repeated energy calcs)
-# memory saving data structures for solutions
+def writemutation(individual, reverseresults, bqmindexdict):
+    # writes the results from the reverse anneal onto the individual
+    for key in bqmindexdict:
+        individual[bqmindexdict[key]] = reverseresults[key]
 
+def breed(population, bqmindexdict, randomtiebreak):
+    # creates one large solution by doing a join of bqms from the population
+    popsize = len(population)
+    breedorder = createjoinorder(bqmindexdict, randomtiebreak)
+    offspring = numpy.zeros(shape=len(population[0]),dtype=int8)
+    for i in breedorder:
+        parent = np.randint(popsize)
+        for key in bqmindexdict[i]:
+            offspring[key] = population[parent][key]
+    return(offspring)
+
+def join(samples, joinindex, bqmindexdict, randomtiebreak, nvars):
+    # creates one large solution by combining the solutions of individual bqms given in samples
+    # each item of samples should be a record.sample list of numpy arrays returned by the BQM solver
+    # joinindex specifies which sample should used for the join
+    joinresult = numpy.zeros(shape=nvars,dtype=int8)
+    joinorder = createjoinorder(bqmindexdict, randomtiebreak)
+    for i in joinorder:
+        for key in bqmindexdict[i]:
+            joinresult[key] = samples[i][joinindex][bqmindexdict[i][q]]
+    return(joinresult)
+
+def createjoinorder(bqmindexdict, randomtiebreak):
+    if randomtiebreak == True:
+        # shuffles the small bqms to ensure a diversity of scenarios over generations for the variables that 
+        # are part of the intersection between bqms
+        bqmindices = list(range(len(bqmindexdict)))
+        joinorder = []
+        startinglen = len(bqmindices)
+        for i in range(startinglen):
+            itemtopop = np.randint(len(bqmindices))
+            joinorder.append(bqmindices.pop(itemtopop))
+        return(joinorder)
+    else:
+        return(list(range(len(bqmindexdict))))
+    
+def initialise(population, sortedfitness, samples, tiebreak, nvars, largebqm, bqmindexdict):
+    # creates first population from inital forward anneals
+    initorder = createjoinorder(bqmindexdict, randomtiebreak)
+    for i in range(samples):
+        population.append(join(samples, i, bqmindexdict, randomtiebreak, nvars))
+        addtofitnesslist(sortedfitness, largebqm, population[i])
+    sortedfitness.sort(key=lambda x: x[0])
+
+def addtofitnesslist(fitnesslist, largebqm, individual):
+    index = len(fitnesslist)
+    fitnesstuple = (calclargeenergy(largebqm,individual),index)
+    fitnesslist.append(fitnesstuple)
+
+def calclargeenergy(largebqm, individual):
+    # stores in memory the calculation of the energy into a dictionary to avoid repeated recalculations
+    if individual in solutiondict:
+        return(solutiondict[individual])
+    else:
+        energy = largebqm.energy(individual,dtype=int8)
+        solutiondict[individual] = energy
+        return(energy)
