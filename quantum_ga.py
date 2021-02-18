@@ -6,9 +6,8 @@
 import numpy as np
 from dimod import ExactSolver, AdjArrayBQM
 from dwave.system import DWaveSampler, EmbeddingComposite
-from helpers.schedule import make_reverse_anneal_schedule 
 
-global solutiondict = {}
+solutiondict = {}
 
 def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
     # largebqm is an AdjArrayBQM object representing the bqm to be solved
@@ -43,13 +42,12 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
     eliteendindex = int(gapopsize*gaparamsdict['eliteratio'])
     parentsindex = int(gapopsize*(1-gaparamsdict['breedratio']))
     revsampler = DWaveSampler(solver=dict(qpu=True, max_anneal_schedule_points__gte=4))
-    max_slope = 1.0/auxsampler.properties['annealing_time_range'][0]
     
     global sampler_reverse
     global reverse_schedule
     sampler = EmbeddingComposite(DWaveSampler())
     sampler_reverse = ReverseAdvanceComposite(revsampler)    
-    reverse_schedule = make_reverse_anneal_schedule(s_target=0.45, hold_time=gaparamsdict['holdtime'], ramp_up_slope=max_slope)
+    reverse_schedule = [[0.0, 1.0], [gaparamsdict['holdtime'], 0.5], [gaparamsdict['annealtime']+gaparamsdict['holdtime'], 1.0]]
     
     samples = []
     variables = []
@@ -86,13 +84,14 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
         population = nextpopulation
         sortedfitness = nextfitness
     
-    return({'lastpopulation': population, 'popindices': popindices, 'sortedfitness': sortedfitness, 'ngen': i)
+    return({'lastpopulation': population, 'popindices': popindices, 'sortedfitness': sortedfitness, 'ngen': i})
 
 def mutate(individual, mutationprob, mutationct, bqms, bqmindexdict, variables):
     # reverse anneals mutationct bqms chosen randomly if this individual is drawn to be mutated
-    if np.random.randint(10000) > 10000*mutationprob:
+    #if np.random.randint(10000) >= 10000*mutationprob:
         # do nothing (individual was not drawn to be mutated)
-    else:
+        # the two comment lines above were added just for clarity
+    if np.random.randint(10000) < 10000*mutationprob:
         mutationidx = np.random.randint(len(bqms), size=mutationct)
         for i in mutationidx:
             init_samples = dict(zip(variables[i], samplefromindividual(individual, bqmindexdict[j])))
@@ -172,6 +171,7 @@ def addtofitnesslist(fitnesslist, largebqm, individual):
 
 def calclargeenergy(largebqm, individual):
     # stores in memory the calculation of the energy into a dictionary to avoid repeated recalculations
+    global solutiondict
     if individual in solutiondict:
         return(solutiondict[individual])
     else:
