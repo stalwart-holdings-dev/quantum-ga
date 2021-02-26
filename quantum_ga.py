@@ -6,6 +6,7 @@
 import numpy as np
 from dimod import ExactSolver, AdjArrayBQM
 from dwave.system import DWaveSampler, EmbeddingComposite
+from dwave.system.composites import ReverseAdvanceComposite
 
 solutiondict = {}
 
@@ -51,8 +52,8 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
     
     samples = []
     variables = []
-    for i in range(len(problemdata['bqms'])):
-        quantumsol = sampler.sample(problemdata['bqms'][i], num_reads=gapopsize, annealing_time=gaparamsdict['annealtime'])
+    for i in range(len(smallbqms)):
+        quantumsol = sampler.sample(smallbqms[i], num_reads=gapopsize, annealing_time=gaparamsdict['annealtime'])
         samples.append(quantumsol.record.sample)
         variables.append(quantumsol.variables)
     
@@ -73,12 +74,12 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
             addtofitnesslist(nextfitness, largebqm, population[j])
         for j in range(eliteendindex,parentsindex):
             # add remaining non-elites with appropriate mutations
-            nextpopulation.append(mutate(population[sortedfitness[j][1]], mutationprob, mutationct, bqms, bqmindexdict, variables))
+            nextpopulation.append(mutate(population[sortedfitness[j][1]], mutationprob, mutationct, smallbqms, bqmindexdict, variables))
             addtofitnesslist(nextfitness, largebqm, population[j])
         for j in range(parentsindex,gapopsize):
             # add breeds with appropriate mutations
             offspring = breed(population, bqmindexdict, tiebreak)
-            nextpopulation.append(mutate(offspring, mutationprob, mutationct, bqms, bqmindexdict, variables))
+            nextpopulation.append(mutate(offspring, mutationprob, mutationct, smallbqms, bqmindexdict, variables))
             addtofitnesslist(nextfitness, largebqm, population[j])
         nextfitness.sort(key=lambda x: x[0])
         population = nextpopulation
@@ -94,7 +95,7 @@ def mutate(individual, mutationprob, mutationct, bqms, bqmindexdict, variables):
     if np.random.randint(10000) < 10000*mutationprob:
         mutationidx = np.random.randint(len(bqms), size=mutationct)
         for i in mutationidx:
-            init_samples = dict(zip(variables[i], samplefromindividual(individual, bqmindexdict[j])))
+            init_samples = dict(zip(variables[i], samplefromindividual(individual, bqmindexdict[i])))
             sampleset = sampler_reverse.sample(bqms[i],
                                    anneal_schedules=reverse_schedule,
                                    initial_state=init_samples,
@@ -110,7 +111,7 @@ def samplefromindividual(individual, bqmindexdict):
     # bqmindexdict[j][i] = k
     # then the k-th variable in the j-th partitioned BQM 
     # corresponds to the i-th variable in the global BQM
-    sample = numpy.zeros(shape=len(bqmindexdict),dtype=int8)
+    sample = np.zeros(shape=len(bqmindexdict),dtype=np.int8)
     for key in bqmindexdict:
         sample[key] = individual[bqmindexdict[key]]
     return(sample)
@@ -124,9 +125,9 @@ def breed(population, bqmindexdict, randomtiebreak):
     # creates one large solution by doing a join of bqms from the population
     popsize = len(population)
     breedorder = createjoinorder(bqmindexdict, randomtiebreak)
-    offspring = numpy.zeros(shape=len(population[0]),dtype=int8)
+    offspring = np.zeros(shape=len(population[0]),dtype=np.int8)
     for i in breedorder:
-        parent = np.randint(popsize)
+        parent = np.random.randint(popsize)
         for key in bqmindexdict[i]:
             offspring[key] = population[parent][key]
     return(offspring)
@@ -135,11 +136,11 @@ def join(samples, joinindex, bqmindexdict, randomtiebreak, nvars):
     # creates one large solution by combining the solutions of individual bqms given in samples
     # each item of samples should be a record.sample list of numpy arrays returned by the BQM solver
     # joinindex specifies which sample should used for the join
-    joinresult = numpy.zeros(shape=nvars,dtype=int8)
+    joinresult = np.zeros(shape=nvars,dtype=np.int8)
     joinorder = createjoinorder(bqmindexdict, randomtiebreak)
     for i in joinorder:
         for key in bqmindexdict[i]:
-            joinresult[key] = samples[i][joinindex][bqmindexdict[i][q]]
+            joinresult[key] = samples[i][joinindex][bqmindexdict[i][key]]
     return(joinresult)
 
 def createjoinorder(bqmindexdict, randomtiebreak):
@@ -150,16 +151,15 @@ def createjoinorder(bqmindexdict, randomtiebreak):
         joinorder = []
         startinglen = len(bqmindices)
         for i in range(startinglen):
-            itemtopop = np.randint(len(bqmindices))
+            itemtopop = np.random.randint(len(bqmindices))
             joinorder.append(bqmindices.pop(itemtopop))
         return(joinorder)
     else:
         return(list(range(len(bqmindexdict))))
     
-def initialise(population, sortedfitness, samples, tiebreak, nvars, largebqm, bqmindexdict):
+def initialise(population, sortedfitness, samples, randomtiebreak, nvars, largebqm, bqmindexdict):
     # creates first population from inital forward anneals
-    initorder = createjoinorder(bqmindexdict, randomtiebreak)
-    for i in range(samples):
+    for i in range(len(samples[0])):
         population.append(join(samples, i, bqmindexdict, randomtiebreak, nvars))
         addtofitnesslist(sortedfitness, largebqm, population[i])
     sortedfitness.sort(key=lambda x: x[0])
@@ -172,9 +172,10 @@ def addtofitnesslist(fitnesslist, largebqm, individual):
 def calclargeenergy(largebqm, individual):
     # stores in memory the calculation of the energy into a dictionary to avoid repeated recalculations
     global solutiondict
-    if individual in solutiondict:
-        return(solutiondict[individual])
+    individualstring = np.array_str(individual)
+    if individualstring in solutiondict:
+        return(solutiondict[individualstring])
     else:
-        energy = largebqm.energy(individual,dtype=int8)
-        solutiondict[individual] = energy
+        energy = largebqm.energy(individual,dtype=np.int8)
+        solutiondict[individualstring] = energy
         return(energy)
