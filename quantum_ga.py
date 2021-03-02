@@ -1,9 +1,7 @@
-# work in progress. this file contains only the first prototype
-# more documentation can be found here:
-# https://docs.ocean.dwavesys.com/projects/system/en/stable/reference/composites.html#reverse-anneal
-# https://cloud.dwavesys.com/leap/learning/
-
+# Quantum Assisted Genetic Algoritm.
+# Mutation operation is a reverse anneal with 5 steps
 import numpy as np
+from copy import deepcopy
 from dimod import ExactSolver, AdjArrayBQM
 from dwave.system import DWaveSampler, EmbeddingComposite
 from dwave.system.composites import ReverseAdvanceComposite
@@ -44,11 +42,14 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
     parentsindex = int(gapopsize*(1-gaparamsdict['breedratio']))
     revsampler = DWaveSampler(solver=dict(qpu=True, max_anneal_schedule_points__gte=4))
     
+    global bqq
+    bqq = largebqm
+
     global sampler_reverse
     global reverse_schedule
     sampler = EmbeddingComposite(DWaveSampler())
-    sampler_reverse = ReverseAdvanceComposite(revsampler)    
-    reverse_schedule = [[0.0, 1.0], [gaparamsdict['holdtime'], 0.5], [gaparamsdict['annealtime']+gaparamsdict['holdtime'], 1.0]]
+    sampler_reverse = EmbeddingComposite(revsampler)    
+    reverse_schedule = [[0,1],[3,0.5],[gaparamsdict['holdtime']+3,0.5],[gaparamsdict['holdtime']+6,1]]
     
     samples = []
     variables = []
@@ -70,22 +71,26 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
         nextfitness = []
         for j in range(0,eliteendindex):
             # add elites to nextpopulation
-            nextpopulation.append(population[sortedfitness[j][1]])
-            addtofitnesslist(nextfitness, largebqm, population[j])
+            newindividual = deepcopy(population[sortedfitness[j][1]])
+            nextpopulation.append(newindividual)
+            addtofitnesslist(nextfitness, largebqm, newindividual)
         for j in range(eliteendindex,parentsindex):
             # add remaining non-elites with appropriate mutations
-            nextpopulation.append(mutate(population[sortedfitness[j][1]], mutationprob, mutationct, smallbqms, bqmindexdict, variables))
-            addtofitnesslist(nextfitness, largebqm, population[j])
+            newindividual = deepcopy(population[sortedfitness[j][1]])
+            mutate(newindividual, mutationprob, mutationct, smallbqms, bqmindexdict, variables)
+            nextpopulation.append(newindividual)
+            addtofitnesslist(nextfitness, largebqm, newindividual)
         for j in range(parentsindex,gapopsize):
             # add breeds with appropriate mutations
             offspring = breed(population, bqmindexdict, tiebreak)
-            nextpopulation.append(mutate(offspring, mutationprob, mutationct, smallbqms, bqmindexdict, variables))
-            addtofitnesslist(nextfitness, largebqm, population[j])
+            mutate(offspring, mutationprob, mutationct, smallbqms, bqmindexdict, variables)
+            nextpopulation.append(offspring)
+            addtofitnesslist(nextfitness, largebqm, offspring)
         nextfitness.sort(key=lambda x: x[0])
         population = nextpopulation
         sortedfitness = nextfitness
     
-    return({'lastpopulation': population, 'popindices': popindices, 'sortedfitness': sortedfitness, 'ngen': i})
+    return({'lastpopulation': population, 'sortedfitness': sortedfitness, 'ngen': i})
 
 def mutate(individual, mutationprob, mutationct, bqms, bqmindexdict, variables):
     # reverse anneals mutationct bqms chosen randomly if this individual is drawn to be mutated
@@ -95,13 +100,14 @@ def mutate(individual, mutationprob, mutationct, bqms, bqmindexdict, variables):
     if np.random.randint(10000) < 10000*mutationprob:
         mutationidx = np.random.randint(len(bqms), size=mutationct)
         for i in mutationidx:
-            init_samples = dict(zip(variables[i], samplefromindividual(individual, bqmindexdict[i])))
+            i_sample = samplefromindividual(individual, bqmindexdict[i])
+            init_samples = dict(zip(variables[i], i_sample))
             sampleset = sampler_reverse.sample(bqms[i],
-                                   anneal_schedules=reverse_schedule,
+                                   anneal_schedule=reverse_schedule,
                                    initial_state=init_samples,
-                                   num_reads=1,
+                                   num_reads=5,
                                    reinitialize_state=False)
-            writemutation(individual, sampleset.record.sample[0], bqmindexdict)
+            writemutation(individual, sampleset.record.sample[np.argmin(sampleset.record.energy)], bqmindexdict[i])
 
 def samplefromindividual(individual, bqmindexdict):
     # builds a sample array for a bqm given the individual and the bqmindexdict
@@ -113,13 +119,13 @@ def samplefromindividual(individual, bqmindexdict):
     # corresponds to the i-th variable in the global BQM
     sample = np.zeros(shape=len(bqmindexdict),dtype=np.int8)
     for key in bqmindexdict:
-        sample[key] = individual[bqmindexdict[key]]
+        sample[bqmindexdict[key]] = individual[key]
     return(sample)
 
 def writemutation(individual, reverseresults, bqmindexdict):
     # writes the results from the reverse anneal onto the individual
     for key in bqmindexdict:
-        individual[bqmindexdict[key]] = reverseresults[key]
+        individual[key] = reverseresults[bqmindexdict[key]]
 
 def breed(population, bqmindexdict, randomtiebreak):
     # creates one large solution by doing a join of bqms from the population
@@ -179,3 +185,4 @@ def calclargeenergy(largebqm, individual):
         energy = largebqm.energy(individual,dtype=np.int8)
         solutiondict[individualstring] = energy
         return(energy)
+
