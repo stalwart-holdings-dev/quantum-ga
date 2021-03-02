@@ -1,5 +1,4 @@
 # Quantum Assisted Genetic Algoritm.
-# Mutation operation is a reverse anneal with 5 steps
 import numpy as np
 from copy import deepcopy
 from dimod import ExactSolver, AdjArrayBQM
@@ -23,8 +22,11 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
     # - gapopsize: population size for the genetic algorithm
     # - gagencount: number if generations to evolve
     # - tgtenergy: a target level of energy to stop the evolution if reached
-    # - holdtime: hold time for a reverse anneal
+    # - forwardmutate: True if the mutation operator is a forward anneal, False if the mutation operator is a reverse anneal
+    # - mutationreads: number of anneals for the mutation operator
+    # - mutationtime: qpu time for a mutation (hold time for a reverse anneal or anneal time for a forward anneal)
     # - annealtime: anneal time for a forward anneal
+    # - reinitstate: boolean indicating if states should be reinitialised during a reverse anneal
     # - mutationct: number of small bqms to be included in one mutation operation
     # - mutationprob: probability that someone who is not elite will mutate
     # - eliteratio: fraction of lowest energy solutions that will carry on to the next generation without being mutated
@@ -36,25 +38,35 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
     nvars = gaparamsdict['nvars']
     tiebreak = gaparamsdict['randomtiebreak']
     mutationct = gaparamsdict['mutationct']
-    gapopsize = gaparamsdict['gapopsize']
     mutationprob = gaparamsdict['mutationprob']
+    
+    global sampler_reverse
+    global reverse_schedule
+    global forwardmutate
+    global mutationreads
+    global mutationtime
+    global reinitstate
+    global annealtime
+    global gapopsize
+    global sampler
+
+    sampler = EmbeddingComposite(DWaveSampler())
+    gapopsize = gaparamsdict['gapopsize']
+    annealtime = gaparamsdict['annealtime']
+    reinitstate = gaparamsdict['reinitstate']
+    mutationtime = gaparamsdict['mutationtime']
+    forwardmutate = gaparamsdict['forwardmutate']
+    mutationreads = gaparamsdict['mutationreads']
     eliteendindex = int(gapopsize*gaparamsdict['eliteratio'])
     parentsindex = int(gapopsize*(1-gaparamsdict['breedratio']))
     revsampler = DWaveSampler(solver=dict(qpu=True, max_anneal_schedule_points__gte=4))
-    
-    global bqq
-    bqq = largebqm
-
-    global sampler_reverse
-    global reverse_schedule
-    sampler = EmbeddingComposite(DWaveSampler())
-    sampler_reverse = EmbeddingComposite(revsampler)    
-    reverse_schedule = [[0,1],[3,0.5],[gaparamsdict['holdtime']+3,0.5],[gaparamsdict['holdtime']+6,1]]
+    sampler_reverse = EmbeddingComposite(revsampler)
+    reverse_schedule = [[0,1],[3,0.45],[mutationtime+3,0.45],[mutationtime+6,1]]
     
     samples = []
     variables = []
     for i in range(len(smallbqms)):
-        quantumsol = sampler.sample(smallbqms[i], num_reads=gapopsize, annealing_time=gaparamsdict['annealtime'])
+        quantumsol = sampler.sample(smallbqms[i], num_reads=gapopsize, annealing_time=annealtime)
         samples.append(quantumsol.record.sample)
         variables.append(quantumsol.variables)
     
@@ -65,6 +77,7 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
                             # value refers to.
     initialise(population, sortedfitness, samples, tiebreak, nvars, largebqm, bqmindexdict)
     for i in range(gaparamsdict['gagencount']):
+        print (sortedfitness[0][0])
         if sortedfitness[0][0] <= gaparamsdict['tgtenergy']:
             break
         nextpopulation = []
@@ -100,13 +113,16 @@ def mutate(individual, mutationprob, mutationct, bqms, bqmindexdict, variables):
     if np.random.randint(10000) < 10000*mutationprob:
         mutationidx = np.random.randint(len(bqms), size=mutationct)
         for i in mutationidx:
-            i_sample = samplefromindividual(individual, bqmindexdict[i])
-            init_samples = dict(zip(variables[i], i_sample))
-            sampleset = sampler_reverse.sample(bqms[i],
+            if forwardmutate:
+                sampleset = sampler.sample(bqms[i], num_reads=mutationreads, annealing_time=annealtime)
+            else:
+                i_sample = samplefromindividual(individual, bqmindexdict[i])
+                init_samples = dict(zip(variables[i], i_sample))
+                sampleset = sampler_reverse.sample(bqms[i],
                                    anneal_schedule=reverse_schedule,
                                    initial_state=init_samples,
-                                   num_reads=5,
-                                   reinitialize_state=False)
+                                   num_reads=mutationreads,
+                                   reinitialize_state=reinitstate)
             writemutation(individual, sampleset.record.sample[np.argmin(sampleset.record.energy)], bqmindexdict[i])
 
 def samplefromindividual(individual, bqmindexdict):
@@ -172,17 +188,17 @@ def initialise(population, sortedfitness, samples, randomtiebreak, nvars, largeb
 
 def addtofitnesslist(fitnesslist, largebqm, individual):
     index = len(fitnesslist)
-    fitnesstuple = (calclargeenergy(largebqm,individual),index)
+    fitnesstuple = (calcenergy(largebqm,individual),index)
     fitnesslist.append(fitnesstuple)
 
-def calclargeenergy(largebqm, individual):
+def calcenergy(bqm, individual):
     # stores in memory the calculation of the energy into a dictionary to avoid repeated recalculations
     global solutiondict
     individualstring = np.array_str(individual)
     if individualstring in solutiondict:
         return(solutiondict[individualstring])
     else:
-        energy = largebqm.energy(individual,dtype=np.int8)
+        energy = bqm.energy(individual,dtype=np.int8)
         solutiondict[individualstring] = energy
         return(energy)
 
