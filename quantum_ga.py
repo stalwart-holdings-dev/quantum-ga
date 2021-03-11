@@ -23,6 +23,7 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
     # - gagencount: number if generations to evolve
     # - tgtenergy: a target level of energy to stop the evolution if reached
     # - forwardmutate: True if the mutation operator is a forward anneal, False if the mutation operator is a reverse anneal
+    # - initialreads: number of anneals for the problem initialisation
     # - mutationreads: number of anneals for the mutation operator
     # - mutationtime: qpu time for a mutation (hold time for a reverse anneal or anneal time for a forward anneal)
     # - annealtime: anneal time for a forward anneal
@@ -39,6 +40,7 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
     tiebreak = gaparamsdict['randomtiebreak']
     mutationct = gaparamsdict['mutationct']
     mutationprob = gaparamsdict['mutationprob']
+    initialreads = gaparamsdict['initialreads']
     
     global sampler_reverse
     global reverse_schedule
@@ -66,37 +68,52 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
     samples = []
     variables = []
     for i in range(len(smallbqms)):
-        quantumsol = sampler.sample(smallbqms[i], num_reads=gapopsize, annealing_time=annealtime)
-        samples.append(quantumsol.record.sample)
+        quantumsol = sampler.sample(smallbqms[i], num_reads=initialreads, annealing_time=annealtime)
+        sortedrecord = quantumsol.record
+        sortedrecord.sort(order='energy')
+        samples.append(sortedrecord.sample)
         variables.append(quantumsol.variables)
+        
     
     population = []         # an array of gapopsize numpy arrays, each being one individual solution
     sortedfitness = []      # a list of two-element tuples containing in the first element of the tuple
                             # the fitness sorted in ascending order (i.e. zero index is the lowest) and in the
                             # second element of the tuple the index in the list population that this fitness
                             # value refers to.
-    initialise(population, sortedfitness, samples, tiebreak, nvars, largebqm, bqmindexdict)
+    initialise(population, sortedfitness, samples, tiebreak, nvars, largebqm, bqmindexdict, gapopsize)
     for i in range(gaparamsdict['gagencount']):
-        print (sortedfitness[0][0])
+        print ('Current Lowest Energy = ' + str(sortedfitness[0][0]))
         if sortedfitness[0][0] <= gaparamsdict['tgtenergy']:
             break
         nextpopulation = []
         nextfitness = []
+        mutationsamples = []
+        revcounter = []
+        fillmutationsamples(mutationsamples, revcounter, population[sortedfitness[0][1]], smallbqms, bqmindexdict, variables)
+
         for j in range(0,eliteendindex):
-            # add elites to nextpopulation
+            # add non-mutated elites to nextpopulation
             newindividual = deepcopy(population[sortedfitness[j][1]])
             nextpopulation.append(newindividual)
             addtofitnesslist(nextfitness, largebqm, newindividual)
-        for j in range(eliteendindex,parentsindex):
-            # add remaining non-elites with appropriate mutations
+        for j in range(eliteendindex, 2*eliteendindex):
+            # add mutated elites to nextpopulation
             newindividual = deepcopy(population[sortedfitness[j][1]])
-            mutate(newindividual, mutationprob, mutationct, smallbqms, bqmindexdict, variables)
+            mutate(newindividual, 1, mutationct, bqmindexdict, mutationsamples, revcounter)
             nextpopulation.append(newindividual)
             addtofitnesslist(nextfitness, largebqm, newindividual)
+        for j in range(2*eliteendindex,parentsindex):
+            # add remaining non-elites with probabilistic mutations
+            newindividual = deepcopy(population[sortedfitness[j-eliteendindex][1]])
+            mutate(newindividual, mutationprob, mutationct, bqmindexdict, mutationsamples, revcounter)
+            nextpopulation.append(newindividual)
+            addtofitnesslist(nextfitness, largebqm, newindividual)
+        for j in range(len(revcounter)):
+            revcounter[j] = 0
         for j in range(parentsindex,gapopsize):
             # add breeds with appropriate mutations
             offspring = breed(population, bqmindexdict, tiebreak)
-            mutate(offspring, mutationprob, mutationct, smallbqms, bqmindexdict, variables)
+            mutate(offspring, mutationprob, mutationct, bqmindexdict, mutationsamples, revcounter)
             nextpopulation.append(offspring)
             addtofitnesslist(nextfitness, largebqm, offspring)
         nextfitness.sort(key=lambda x: x[0])
@@ -105,25 +122,32 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
     
     return({'lastpopulation': population, 'sortedfitness': sortedfitness, 'ngen': i})
 
-def mutate(individual, mutationprob, mutationct, bqms, bqmindexdict, variables):
-    # reverse anneals mutationct bqms chosen randomly if this individual is drawn to be mutated
+def fillmutationsamples(mutationsamples, revcounter, individual, bqms, bqmindexdict, variables):
+    for i in range(len(bqms)):
+        if forwardmutate:
+            sampleset = sampler.sample(bqms[i], num_reads=mutationreads, annealing_time=annealtime)
+        else:
+            i_sample = samplefromindividual(individual, bqmindexdict[i])
+            init_samples = dict(zip(variables[i], i_sample))
+            sampleset = sampler_reverse.sample(bqms[i],
+                                anneal_schedule=reverse_schedule,
+                                initial_state=init_samples,
+                                num_reads=mutationreads,
+                                reinitialize_state=reinitstate)
+        sortedrecord = sampleset.record
+        sortedrecord.sort(order='energy')
+        mutationsamples.append(sortedrecord.sample)
+        revcounter.append(0)
+
+def mutate(individual, mutationprob, mutationct, bqmindexdict, mutationsamples, revcounter):
     #if np.random.randint(10000) >= 10000*mutationprob:
         # do nothing (individual was not drawn to be mutated)
         # the two comment lines above were added just for clarity
     if np.random.randint(10000) < 10000*mutationprob:
-        mutationidx = np.random.randint(len(bqms), size=mutationct)
+        mutationidx = np.random.randint(len(bqmindexdict), size=mutationct)
         for i in mutationidx:
-            if forwardmutate:
-                sampleset = sampler.sample(bqms[i], num_reads=mutationreads, annealing_time=annealtime)
-            else:
-                i_sample = samplefromindividual(individual, bqmindexdict[i])
-                init_samples = dict(zip(variables[i], i_sample))
-                sampleset = sampler_reverse.sample(bqms[i],
-                                   anneal_schedule=reverse_schedule,
-                                   initial_state=init_samples,
-                                   num_reads=mutationreads,
-                                   reinitialize_state=reinitstate)
-            writemutation(individual, sampleset.record.sample[np.argmin(sampleset.record.energy)], bqmindexdict[i])
+            writemutation(individual, mutationsamples[i][revcounter[i]], bqmindexdict[i])
+            revcounter[i] = revcounter[i]+1
 
 def samplefromindividual(individual, bqmindexdict):
     # builds a sample array for a bqm given the individual and the bqmindexdict
@@ -179,9 +203,9 @@ def createjoinorder(bqmindexdict, randomtiebreak):
     else:
         return(list(range(len(bqmindexdict))))
     
-def initialise(population, sortedfitness, samples, randomtiebreak, nvars, largebqm, bqmindexdict):
-    # creates first population from inital forward anneals
-    for i in range(len(samples[0])):
+def initialise(population, sortedfitness, samples, randomtiebreak, nvars, largebqm, bqmindexdict, gapopsize):
+    # creates first population from inital forward anneals getting only the top gapopsize reads
+    for i in range(gapopsize):
         population.append(join(samples, i, bqmindexdict, randomtiebreak, nvars))
         addtofitnesslist(sortedfitness, largebqm, population[i])
     sortedfitness.sort(key=lambda x: x[0])
