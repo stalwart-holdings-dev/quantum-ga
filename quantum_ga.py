@@ -52,7 +52,7 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
     global gapopsize
     global sampler
 
-    sampler = EmbeddingComposite(DWaveSampler())
+    sampler = EmbeddingComposite(DWaveSampler(topology__type='pegasus'))
     gapopsize = gaparamsdict['gapopsize']
     annealtime = gaparamsdict['annealtime']
     reinitstate = gaparamsdict['reinitstate']
@@ -61,7 +61,7 @@ def SolveLargeBQM(largebqm, smallbqms, bqmindexdict, gaparamsdict):
     mutationreads = gaparamsdict['mutationreads']
     eliteendindex = int(gapopsize*gaparamsdict['eliteratio'])
     parentsindex = int(gapopsize*(1-gaparamsdict['breedratio']))
-    revsampler = DWaveSampler(solver=dict(qpu=True, max_anneal_schedule_points__gte=4))
+    revsampler = DWaveSampler(solver=dict(qpu=True, max_anneal_schedule_points__gte=4, topology__type='pegasus'))
     sampler_reverse = EmbeddingComposite(revsampler)
     reverse_schedule = [[0,1],[3,0.45],[mutationtime+3,0.45],[mutationtime+6,1]]
     
